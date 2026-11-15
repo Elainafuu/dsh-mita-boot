@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "deepseek-game-boot",
+  "name": "DeepSeek 大肥鱼 · 米塔式启动",
+  "author": "视频素材：BV1YN416DEEg（UP：这里叫艾兰德Ai_land，动作参考《米塔》启动菜单）；模板：傅冬阳",
+  "homepage": "https://www.bilibili.com/video/BV1YN416DEEg",
+  "license": "MIT（仅模板 JSON）；视频素材权利归原作者",
+  "version": "4.0.0",
+  "minSuiteVersion": "2.13.0",
+  "description": "米塔式启动：只取视频里最后那一个启动界面（14.9–18.3 秒，3.4 秒）：人物先在中间，随后镜头推近并右移落到菜单位置；结束帧与聊天背景的循环动画同构图，界面直接在左边浮上来，全程没有黑场。视频里每次转场是另一个启动界面，这里只用一个。",
+  "tags": [
+    "game",
+    "deepseek",
+    "whale",
+    "anime",
+    "video",
+    "mizhu"
+  ],
+  "duration": 2470,
+  "lastFrame": "boot-last.jpg",
+  "noCurtain": true,
+  "theme": {
+    "accent": "#ff5fa2",
+    "glitchA": "#ff3b30",
+    "glitchB": "#2971b8"
+  },
+  "segments": [
+    {
+      "name": "中间登场 → 右侧落位",
+      "from": 0,
+      "to": 2470
+    }
+  ],
+  "layers": [
+    {
+      "id": "bg",
+      "type": "panel",
+      "pos": [640, 360],
+      "panelW": 1280,
+      "panelH": 720,
+      "fill": "#000000",
+      "radius": 0,
+      "keyframes": [
+        { "t": 0, "opacity": 1 }
+      ]
+    },
+    {
+      "id": "game",
+      "type": "video",
+      "pos": [640, 360],
+      "videoW": 1280,
+      "videoH": 720,
+      "src": "boot-main.mp4",
+      "keyframes": [
+        { "t": 0, "opacity": 1 },
+        { "t": 2470, "opacity": 1 }
+      ]
+    }
+  ],
+  "effects": []
+}

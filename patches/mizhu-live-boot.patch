@@ -1,0 +1,536 @@
+diff --git a/lib/host-startup.js b/lib/host-startup.js
+index 39a8582..46fc057 100644
+--- a/lib/host-startup.js
++++ b/lib/host-startup.js
+@@ -188,7 +188,8 @@ function normalize(input) {
+ 
+ function readConfig() {
+   try {
+-    const rawText = fs.readFileSync(CONFIG_FILE, 'utf8')
++    /* 本地补丁：兼容带 UTF-8 BOM 的配置文件（PowerShell Set-Content 会写 BOM，JSON.parse 会直接失败） */
++    const rawText = fs.readFileSync(CONFIG_FILE, 'utf8').replace(/^\uFEFF/, '')
+     const raw = JSON.parse(rawText)
+     const cfg = normalize(raw)
+     /* 老配置里没有 act2：保持单幕，避免升级后突然多播一段 */
+diff --git a/lib/splash.css b/lib/splash.css
+index a9d5a08..faef474 100644
+--- a/lib/splash.css
++++ b/lib/splash.css
+@@ -1234,7 +1234,7 @@
+ #dsh-startup-root.dsu-terminal .dsu-status { letter-spacing: 0.1em; }
+ #dsh-startup-root.dsu-terminal .dsu-sub-en { letter-spacing: 0.22em; }
+ /* ══ 时间线模板（v2：layers + 关键帧）═══════════════════════════════════ */
+-#dsh-startup-root.dsu-tl { background: var(--dsu-bg); }
++#dsh-startup-root.dsu-tl { background: #000; }
+ #dsh-startup-root.dsu-tl > *:not(.dsu-tl-stage) { display: none !important; }
+ .dsu-tl-stage { position: absolute; left: 50%; top: 50%; width: 1280px; height: 720px; overflow: hidden; z-index: 20; transform-origin: 50% 50%; }
+ .dsu-tl-layer { position: absolute; left: 0; top: 0; will-change: transform, opacity; transform-origin: 50% 50%; }
+diff --git a/lib/splash.js b/lib/splash.js
+index 1b45410..464b67b 100644
+--- a/lib/splash.js
++++ b/lib/splash.js
+@@ -2166,7 +2166,8 @@
+   function fitStage(stage) {
+     var w = window.innerWidth || TL_W
+     var h = window.innerHeight || TL_H
+-    var s = Math.min(w / TL_W, h / TL_H)
++    /* 本地补丁：改成 cover 取景，和聊天背景的 object-fit:cover 一致，避免片尾“突然变大”和上下黑边 */
++    var s = (TEMPLATE && TEMPLATE.stageFit === 'contain') ? Math.min(w / TL_W, h / TL_H) : Math.max(w / TL_W, h / TL_H)
+     stage.style.transform = 'translate(-50%, -50%) scale(' + s + ')'
+   }
+ 
+@@ -2199,7 +2200,28 @@
+         vnode.style.height = vh + 'px'
+         vnode.style.objectFit = 'cover'
+         vnode.style.pointerEvents = 'none'
+-        var vfile = String(L.src || '').replace(/^.*\//, '')
++        /* 本地补丁：video 层支持 variants 数组，洗牌袋随机取一段（一轮内不重复） */
++        var vsrc = String(L.src || '')
++        var vlist = Array.isArray(L.variants) ? L.variants.filter(function (v) { return typeof v === 'string' && v }) : []
++        if (vlist.length) {
++          var deck = []
++          try { deck = JSON.parse(localStorage.getItem('dsh-startup-deck') || '[]') } catch (eD) { deck = [] }
++          if (!Array.isArray(deck)) deck = []
++          deck = deck.filter(function (v) { return vlist.indexOf(v) >= 0 })
++          if (!deck.length) {
++            deck = vlist.slice()
++            for (var di = deck.length - 1; di > 0; di--) {
++              var dj = Math.floor(Math.random() * (di + 1))
++              var dt = deck[di]; deck[di] = deck[dj]; deck[dj] = dt
++            }
++          }
++          vsrc = deck.pop()
++          try { localStorage.setItem('dsh-startup-deck', JSON.stringify(deck)) } catch (eS) {}
++          diagRun('variant pick ' + vsrc)
++        }
++        var vfile = vsrc.replace(/^.*\//, '')
++        LIVE_VARIANT = vfile
++        try { primeLoopVideo() } catch (ePr) { /* 壁纸层可能还没挂上，片尾前还会再试一次 */ }
+         var vbase = ''
+         try { vbase = String(window.__DSH_STARTUP_TPL_BASE__ || '') } catch (eV) { vbase = '' }
+         if (!vbase) vbase = '/dsh-startup'
+@@ -2208,7 +2230,11 @@
+           vnode.src = vbase + '/template-asset/' + encodeURIComponent(vtpl) + '/' + encodeURIComponent(vfile)
+         }
+         vnode.addEventListener('play', function () { diagRun('video play ' + vfile + ' vids=' + videoCount()) })
+-        vnode.addEventListener('ended', function () { diagRun('video ended ' + vfile) })
++        vnode.addEventListener('ended', function () {
++          diagRun('video ended ' + vfile)
++          /* 时间轴时钟比视频起播晚，别再等它：视频播完立刻交接，末帧不会定住 */
++          try { finish() } catch (eEnd) {}
++        })
+         vnode.addEventListener('error', function () { diagRun('video error ' + vfile) })
+         placeLayer(vnode, tlNumber(L.pos && L.pos[0], 640), tlNumber(L.pos && L.pos[1], 360), vw, vh)
+         stage.appendChild(vnode)
+@@ -2476,7 +2502,7 @@
+         dots: L.dots, dotsFile: L.dotsFile, formText: L.formText, box: L.box, align: L.align, boxScale: L.boxScale, wipeFrom: L.wipeFrom,
+         spread: L.spread, shapeScale: L.shapeScale,
+         hasTyped: kfs.some(function (k) { return k.typed !== undefined }),
+-        src: L.src, width: L.width, pos: L.pos, size: L.size,
++        src: L.src, variants: L.variants, width: L.width, pos: L.pos, size: L.size,
+         keyframes: kfs
+       })
+     }
+@@ -2989,6 +3015,19 @@
+     }
+     var tl = tlUi || (tlUi = buildTimeline())
+     var duration = tl.duration
++    /* 本地补丁：片尾淡出前抓帧 + 铺静帧，揭幕时交给聊天壁纸 */
++    if (!liveArmed) {
++      liveArmed = true
++      setTimeout(captureLiveFrame, Math.max(150, duration - 80))
++      setTimeout(function () { try { primeLastFrame() } catch (eLf0) {} }, 0)
++      setTimeout(function () { try { primeLastFrame() } catch (eLf1) {} }, 700)
++      setTimeout(function () { try { primeLastFrame() } catch (eLf2) {} }, 1500)
++      /* 主界面提前 320ms 就开始淡入（被全屏视频挡着，看不见），视频一交出去菜单已经在了 */
++
++      /* 壁纸层大约在片头起来后 0.6–1s 才挂上，这里补两次准备 */
++      setTimeout(function () { try { primeLoopVideo() } catch (eP1) {} }, 700)
++      setTimeout(function () { try { primeLoopVideo() } catch (eP2) {} }, 1500)
++    }
+     var elapsed = 0
+     if (JUMP && isFinite(Number(JUMP.at))) elapsed = Math.max(0, Math.min(duration - 1, Number(JUMP.at)))
+     var cuesFired = {}
+@@ -3577,10 +3616,406 @@
+       })
+   }
+ 
++  /* ── 本地补丁：片尾帧转聊天壁纸 + 看鼠标 / 打字低头 ────────────────── */
++  var LIVE_FRAME = ''
++  var LIVE_VARIANT = ''
++  var liveArmed = false
++  var HANDOFF_ACTIVE = false
++  var REVEAL_STARTED = false
++
++  /* 让聊天界面开始淡入：动画还在播时就开始，交接瞬间它已经出来一半了 */
++  function beginReveal() {
++    if (REVEAL_STARTED) return
++    diagRun('reveal: start t=' + Math.round((window.performance || Date).now()))
++    REVEAL_STARTED = true
++    var appEl = null
++    try { appEl = document.getElementById('root') } catch (e0) {}
++    try {
++      if (appEl) {
++        appEl.style.transition = 'none'
++        appEl.style.opacity = '0'
++        void appEl.offsetWidth
++        appEl.style.transition = 'opacity 500ms cubic-bezier(.2,.8,.2,1)'
++      }
++    } catch (e1) {}
++    try {
++      root.style.transition = 'none'
++      root.style.backgroundColor = 'rgba(0,0,0,0)'
++    } catch (e2) {}
++    /* 先让主界面在 opacity 0 下真正画出一帧，再开始淡入，避免“露出来时还是空壳”的那一下 */
++    requestAnimationFrame(function () {
++      requestAnimationFrame(function () {
++        try {
++          if (appEl) {
++            appEl.style.transition = 'opacity 500ms cubic-bezier(.2,.8,.2,1)'
++            appEl.style.opacity = '1'
++          }
++          diagRun('reveal: app painted t=' + Math.round((window.performance || Date).now()))
++        } catch (e3) {}
++      })
++    })
++  }
++
++  /* 模板自带片尾帧（lastFrame）时，直接用静态图，运行时完全不抓帧/编码 */
++  function primeLastFrame() {
++    if (!(TEMPLATE && TEMPLATE.lastFrame)) return
++    var base = String(window.__DSH_STARTUP_TPL_BASE__ || '') || '/dsh-startup'
++    var tplId = (TEMPLATE && TEMPLATE.id) ? String(TEMPLATE.id) : ''
++    var url = base + '/template-asset/' + encodeURIComponent(tplId) + '/' + encodeURIComponent(String(TEMPLATE.lastFrame))
++    if (!LIVE_FRAME || LIVE_FRAME.indexOf('/template-asset/') < 0) LIVE_FRAME = url
++    try {
++      if (!window.__dshLastPreload) { window.__dshLastPreload = true; var pre = new Image(); pre.src = url }
++    } catch (ePre0) {}
++    try {
++      var h0 = document.getElementById('dsh-cw-bg')
++      var im0 = h0 && h0.querySelector('img')
++      if (im0 && im0.getAttribute('src') !== url) {
++        im0.style.opacity = '0'
++        im0.src = url
++        try { if (im0.decode) im0.decode().catch(function () {}) } catch (eDec) {}
++      }
++    } catch (ePre1) {}
++  }
++
++  function captureLiveFrame(force) {
++    if (TEMPLATE && TEMPLATE.lastFrame) return
++    if (finished && !force) return
++    /* 先补一次启动准备：壁纸层通常要到片头播起来才挂上，buildTimeline 那次多半扑空 */
++    try { primeLoopVideo() } catch (ePr0) {}
++    if (LIVE_FRAME) return
++    /* 有循环视频就直接交给视频，不再抓一张 1080p 静帧（drawImage + toDataURL 会卡一下） */
++    if (TEMPLATE && TEMPLATE.loop) return
++    try {
++      var v = null
++      var list = (tlUi && tlUi.nodes) || []
++      for (var i = 0; i < list.length; i++) { if (list[i] && list[i].video) { v = list[i].video; break } }
++      if (!v || !v.videoWidth || v.readyState < 2) return
++      var w = Math.min(1280, v.videoWidth)
++      var h = Math.round(v.videoHeight * w / v.videoWidth)
++      var c = document.createElement('canvas')
++      c.width = w; c.height = h
++      c.getContext('2d').drawImage(v, 0, 0, w, h)
++      LIVE_FRAME = c.toDataURL('image/jpeg', 0.9)
++      diagRun('live: frame captured ' + w + 'x' + h)
++      /* 提前把图塞进壁纸层并预解码（透明），交接时只翻透明度，避免临时编码卡一下 */
++      try {
++        var h0 = document.getElementById('dsh-cw-bg')
++        var im0 = h0 && h0.querySelector('img')
++        if (im0) { im0.style.opacity = '0'; im0.src = LIVE_FRAME }
++      } catch (ePre) {}
++      try { primeLoopVideo() } catch (ePr2) { /* 同上 */ }
++    } catch (e) { /* canvas 不可用就算了 */ }
++  }
++
++  /* 淡出开始时用同一张静帧顶替视频，避免“先淡到黑再亮回来” */
++  function showHold() {
++    if (!LIVE_FRAME || !root) return
++    try {
++      /* 时间线模式下 root 会隐藏除舞台外的子元素，所以静帧直接铺在 root 自己的背景上 */
++      root.style.backgroundImage = 'url(' + LIVE_FRAME + ')'
++      root.style.backgroundSize = 'cover'
++      root.style.backgroundPosition = 'center'
++      root.style.backgroundRepeat = 'no-repeat'
++      var st = root.querySelector('.dsu-tl-stage')
++      if (st) st.style.visibility = 'hidden'
++      var blk = root.querySelector('.dsu-black')
++      if (blk) blk.style.display = 'none'
++    } catch (e2) { /* 最坏也只是闪一下 */ }
++  }
++
++  /* 自己写的待机动画：呼吸 + 重心摆动 + 微转头 + 随机眨眼节奏，用 rAF 连续插值，永不重复同一段 */
++  function installLiveReactions(img) {
++    if (!img || img.__dshLive) return
++    img.__dshLive = true
++    img.style.transformOrigin = '50% 42%'
++    img.style.willChange = 'transform'
++    var cur = { x: 0, y: 0, r: 0, s: 1 }
++    var goal = { x: 0, y: 0, r: 0, s: 1 }
++    var mx = 0, my = 0, typ = 0
++    var nextPick = 0
++    var t0 = 0
++    function pick(now) {
++      /* 呼吸：4.6~6.2 秒一个周期，幅度 0.8%~1.6% */
++      goal.s = 1 + (0.008 + Math.random() * 0.008) * (Math.sin(now / 4600 * Math.PI * 2) * 0.5 + 0.5)
++      /* 重心：左右 ±7px、上下 ±3px、旋转 ±0.6°，每次随机换目标 */
++      goal.x = (Math.random() * 2 - 1) * 7
++      goal.y = (Math.random() * 2 - 1) * 3
++      goal.r = (Math.random() * 2 - 1) * 0.6
++      nextPick = now + 2600 + Math.random() * 3200
++    }
++    function frame(now) {
++      if (!t0) t0 = now
++      if (now > nextPick) pick(now)
++      var k = 0.035
++      cur.x += (goal.x + mx - cur.x) * k
++      cur.y += (goal.y + my + typ - cur.y) * k
++      cur.r += (goal.r - cur.r) * k
++      cur.s += (goal.s - cur.s) * 0.02
++      var breath = 1 + Math.sin(now / 5200 * Math.PI * 2) * 0.006
++      img.style.transform = 'translate3d(' + cur.x.toFixed(2) + 'px,' + cur.y.toFixed(2) + 'px,0) rotate(' +
++        cur.r.toFixed(2) + 'deg) scale(' + (cur.s * breath).toFixed(4) + ')'
++      requestAnimationFrame(frame)
++    }
++    requestAnimationFrame(frame)
++    var lastMove = 0
++    window.addEventListener('mousemove', function (e) {
++      var nowM = (window.performance && performance.now) ? performance.now() : Date.now()
++      if (nowM - lastMove < 40) return
++      lastMove = nowM
++      var w = window.innerWidth || 1280
++      var h = window.innerHeight || 800
++      var nx = (e.clientX / w - 0.5) * 2
++      var ny = (e.clientY / h - 0.5) * 2
++      mx = -nx * 9
++      my = -ny * 6
++    }, { passive: true })
++    document.addEventListener('keydown', function (e) {
++      var t = e.target
++      var tag = t && t.tagName ? t.tagName.toLowerCase() : ''
++      if (tag !== 'input' && tag !== 'textarea' && !(t && t.isContentEditable)) return
++      typ = 9
++      setTimeout(function () { typ = 0 }, 420)
++    }, true)
++  }
++
++  /* 黑幕：交接时先渐黑，等背景视频真的出画面了再渐亮，遮住起播那一顿 */
++  var LIVE_CURTAIN = null
++  function armCurtain() {
++    if (LIVE_CURTAIN) return
++    try {
++      var c = document.createElement('div')
++      c.id = 'dsh-live-curtain'
++      c.style.cssText = 'position:fixed;inset:0;z-index:2147483200;background:#000;opacity:0;pointer-events:none;transition:opacity 160ms ease'
++      document.body.appendChild(c)
++      void c.offsetWidth
++      c.style.opacity = '1'
++      c.__t0 = (window.performance && performance.now) ? performance.now() : Date.now()
++      LIVE_CURTAIN = c
++    } catch (e) { LIVE_CURTAIN = null }
++  }
++  function revealCurtain(delay) {
++    var c = LIVE_CURTAIN
++    if (!c || c.__revealed) return
++    c.__revealed = true
++    /* 至少黑住 300ms（160ms 渐黑 + 约 140ms 停顿），再渐亮 */
++    var nowMs = (window.performance && performance.now) ? performance.now() : Date.now()
++    var held = nowMs - (c.__t0 || nowMs)
++    var wait = Math.max(delay || 0, 300 - held)
++    setTimeout(function () {
++      try {
++        c.style.transition = 'opacity 420ms ease'
++        c.style.opacity = '0'
++        setTimeout(function () { if (c && c.parentNode) c.parentNode.removeChild(c) }, 620)
++      } catch (e) {}
++    }, wait)
++  }
++
++  /* 提前把循环视频挂上、缓冲好并 seek 到位（opacity 0 藏着），交接时只剩 play()，不会卡 */
++  function primeLoopVideo() {
++    if (!(TEMPLATE && TEMPLATE.loop)) return null
++    var host = document.getElementById('dsh-cw-bg')
++    if (!host) return null
++    var v = document.getElementById('dsh-live-video')
++    if (!v) {
++      v = document.createElement('video')
++      v.id = 'dsh-live-video'
++      v.muted = true
++      v.defaultMuted = true
++      v.loop = true
++      v.playsInline = true
++      v.preload = 'auto'
++      v.setAttribute('aria-hidden', 'true')
++      v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center;display:block;background:#000;opacity:0'
++      /* 插到纱之前、旧壁纸之后：否则会被旧壁纸盖住 */
++      var veil0 = host.querySelector('.dsh-cw-veil')
++      if (veil0) host.insertBefore(v, veil0)
++      else host.appendChild(v)
++    }
++    if (!v.getAttribute('data-src-set')) {
++      v.setAttribute('data-src-set', '1')
++      var tplId = (TEMPLATE && TEMPLATE.id) ? String(TEMPLATE.id) : ''
++      var vbase = String(window.__DSH_STARTUP_TPL_BASE__ || '') || '/dsh-startup'
++      v.src = vbase + '/template-asset/' + encodeURIComponent(tplId) + '/' + encodeURIComponent(String(TEMPLATE.loop))
++      var at = 0
++      try { at = Number((TEMPLATE.loopAt || {})[LIVE_VARIANT]) || 0 } catch (eL2) { at = 0 }
++      v.__at = at
++      v.__seek = function () {
++        if (v.__seeked) return
++        v.__seeked = true
++        try { v.currentTime = Math.min(at, Math.max(0, (v.duration || 0) - 0.1)) } catch (eT) {}
++      }
++      if (v.readyState >= 1) v.__seek()
++      else v.addEventListener('loadedmetadata', v.__seek, { once: true })
++      /* 提前 muted 开播（藏在 opacity 0 里），交接时解码器已经热着，不再有起播的顿挫 */
++      try {
++        var p0 = v.play()
++        if (p0 && p0.catch) p0.catch(function () {})
++        v.addEventListener('loadedmetadata', function () {
++          var p1 = v.play(); if (p1 && p1.catch) p1.catch(function () {})
++        }, { once: true })
++      } catch (ePl) {}
++      diagRun('live: prime create')
++    } else if (!v.__seeked) {
++      try { if (v.readyState >= 1) v.__seek() } catch (eS2) {}
++    }
++    return v
++  }
++
++  /* 按视频舞台的 cover 公式摆放截图：left/top/宽高和 fitStage 完全同源，
++     交接瞬间位置、缩放、裁切一致；窗口 resize 时重算，保证脸不被裁掉。 */
++  function placeLiveImage(img) {
++    if (!img) return
++    var w = window.innerWidth || 1280
++    var h = window.innerHeight || 720
++    var s = Math.max(w / 1280, h / 720)
++    var rw = 1280 * s
++    var rh = 720 * s
++    img.style.position = 'absolute'
++    img.style.left = ((w - rw) / 2) + 'px'
++    img.style.top = ((h - rh) / 2) + 'px'
++    img.style.width = rw + 'px'
++    img.style.height = rh + 'px'
++    img.style.objectFit = 'cover'
++    img.style.objectPosition = '50% 50%'
++    img.style.transform = 'none'
++  }
++
++  function applyLiveWallpaper() {
++    var hasLoop = !!(TEMPLATE && TEMPLATE.loop)
++    if (!LIVE_FRAME && !hasLoop) return
++    var host = document.getElementById('dsh-cw-bg')
++    if (!host) { diagRun('live: no wallpaper layer'); return }
++    var img = host.querySelector('img')
++    if (!img) {
++      img = document.createElement('img')
++      img.setAttribute('aria-hidden', 'true')
++      img.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;object-position:center'
++      host.insertBefore(img, host.firstChild)
++    }
++    try { img.style.objectFit = 'cover' } catch (e3) {}
++    if (LIVE_FRAME && img.getAttribute('src') !== LIVE_FRAME) { try { img.src = LIVE_FRAME } catch (e) {} }
++    /* 背景是循环的“菜单动画”，启动阶段就已经缓冲好并 seek 到对应位置，这里只负责开播 */
++    var liveVideo = null
++    try { liveVideo = primeLoopVideo() } catch (ePf) { liveVideo = null }
++    if (liveVideo) {
++      try { liveVideo.style.opacity = '1' } catch (eOp) {}
++      try { img.style.display = 'none' } catch (eImg) {}   /* 旧壁纸必须让开 */
++      /* 米塔式：结束帧和背景第一帧是同一帧，直接交出去，不加黑幕 */
++      if (!(TEMPLATE && TEMPLATE.noCurtain)) armCurtain()
++      /* 黑幕盖住之后再改文字明暗，免得整棵树的样式重算卡在视频最后一帧上 */
++      try {
++        var de = document.documentElement
++        de.classList.remove('dsh-cw-bg-light', 'dsh-cw-txt-dark', 'dsh-cw-panel-dark')
++        de.classList.add('dsh-cw-bg-dark', 'dsh-cw-txt-light', 'dsh-cw-panel-light')
++      } catch (e4) {}
++      liveVideo.addEventListener('error', function () {
++        try { img.style.display = '' } catch (eE) {}
++        installLiveReactions(img)
++        revealCurtain(0)
++      }, { once: true })
++      var pp = liveVideo.play(); if (pp && pp.catch) pp.catch(function () {})
++      setTimeout(function () { revealCurtain(0) }, 260)   /* 视频早就跑着了，黑约 300ms 就够 */
++      setTimeout(function () { revealCurtain(0) }, 900)   /* 兜底：最多黑 0.9 秒 */
++      /* 窗口不可见时停掉解码，回来再接着播 */
++      if (!liveVideo.__dshVis) {
++        liveVideo.__dshVis = true
++        document.addEventListener('visibilitychange', function () {
++          try {
++            if (document.hidden) liveVideo.pause()
++            else { var pv = liveVideo.play(); if (pv && pv.catch) pv.catch(function () {}) }
++          } catch (eV) {}
++        })
++      }
++    }
++    if (!liveVideo) {
++      /* 连续交接：人物层始终在聊天界面下面，同一帧接上，
++         0.5 秒里连续右移+放大，同时聊天界面淡入；没有黑色转场，也没有定格等待。 */
++      try {
++        if (LIVE_FRAME) {
++          HANDOFF_ACTIVE = true
++          /* 不再对静帧做位移/缩放：推近右移全部由视频本身完成，交接只是同帧替换 + 界面淡入 */
++          var target = 'none'
++          try {
++            if (!document.getElementById('dsh-live-shade')) {
++              var sh = document.createElement('div')
++              sh.id = 'dsh-live-shade'
++              sh.setAttribute('aria-hidden', 'true')
++              sh.style.cssText = 'position:absolute;inset:0;pointer-events:none;opacity:0;transition:opacity 500ms ease;z-index:2;' +
++                'background:linear-gradient(90deg, rgba(9,6,14,.72) 0%, rgba(9,6,14,.58) 38%, rgba(9,6,14,.28) 58%, rgba(9,6,14,0) 72%)'
++              host.appendChild(sh)
++              void sh.offsetWidth
++              sh.style.opacity = '1'
++            }
++          } catch (eSh) {}
++          /* 背景调亮：纱减弱 + 画面稍提亮，人物看得清 */
++          try {
++            var veil0 = host.querySelector('.dsh-cw-veil')
++            if (veil0) veil0.style.opacity = '0.5'
++          } catch (eV) {}
++          try { img.style.filter = 'brightness(1.12) saturate(1.03)' } catch (eF) {}
++          /* 按舞台的 cover 矩形摆放截图，交接瞬间位置/缩放/裁切完全一致；resize 时重算 */
++          try { placeLiveImage(img) } catch (ePl) {}
++          try { img.style.opacity = '1' } catch (eI0) {}
++          if (!window.__dshLiveResize) {
++            window.__dshLiveResize = true
++            window.addEventListener('resize', function () {
++              try { placeLiveImage(document.querySelector('#dsh-cw-bg img')) } catch (eRz) {}
++            })
++          }
++          try {
++            var stg = root.querySelector('.dsu-tl-stage')
++            if (stg) stg.style.visibility = 'hidden'
++          } catch (eStg) {}
++          try { if (!REVEAL_STARTED) beginReveal() } catch (eRv2) {}
++          try {
++            img.style.transition = 'none'
++            img.style.transform = 'none'
++          } catch (eT) {}
++        }
++      } catch (eHo) {}
++      try {
++        var de2 = document.documentElement
++        de2.classList.remove('dsh-cw-bg-light', 'dsh-cw-txt-dark', 'dsh-cw-panel-dark')
++        de2.classList.add('dsh-cw-bg-dark', 'dsh-cw-txt-light', 'dsh-cw-panel-light')
++      } catch (e5) {}
++      /* 静帧背景：写一套待机动画自己演——呼吸缩放 + 缓慢摆动/微转头，周期互质，看不出循环 */
++      try {
++        if (!document.getElementById('dsh-breathe-style')) {
++          var bst = document.createElement('style')
++          bst.id = 'dsh-breathe-style'
++          bst.textContent =
++            '@keyframes dshBreathe{0%{transform:scale(1.000)}50%{transform:scale(1.014)}100%{transform:scale(1.000)}}' +
++            '@keyframes dshSway{0%{transform:translate(0,0) rotate(0deg)}' +
++            '28%{transform:translate(3px,-2px) rotate(0.28deg)}' +
++            '57%{transform:translate(-1px,2px) rotate(0.42deg)}' +
++            '81%{transform:translate(2px,0px) rotate(-0.18deg)}' +
++            '100%{transform:translate(0,0) rotate(0deg)}}' +
++            ''
++          document.head.appendChild(bst)
++        }
++        if (!document.getElementById('dsh-live-idle')) {
++          var wrap = document.createElement('div')
++          wrap.id = 'dsh-live-idle'
++          wrap.style.cssText = 'position:absolute;inset:0'
++          host.insertBefore(wrap, img)
++          wrap.appendChild(img)
++        }
++      } catch (eB) {}
++    }
++    installLiveReactions(liveVideo || img)
++    diagRun('live: frame handed to wallpaper' + (liveVideo ? ' + loop ' + liveVideo.currentTime.toFixed(2) + 's' : ''))
++  }
++
+   function finish() {
+     if (finished) return
+     diagRun('finish videos=' + videoCount())
+     finished = true
++    /* 先停掉片头那个解码器，别和背景视频抢 */
++    try {
++      var bs = (tlUi && tlUi.nodes) || []
++      for (var bi = 0; bi < bs.length; bi++) { if (bs[bi] && bs[bi].video) { bs[bi].video.pause(); break } }
++    } catch (ePause) {}
++    try { applyLiveWallpaper() } catch (eLive) { diagRun('live: apply failed ' + (eLive && eLive.message)) }
+     invalidateRun()   /* 取消体系：本次播放的延时任务全部作废 */
+     /* v2.12.0：转场覆盖层兜底清理。transOut 的「揭开」阶段要保留覆盖层，
+        此时 transPreserve=true，由 transPlayReveal 负责移除。 */
+@@ -3609,6 +4044,15 @@
+     root.classList.remove('dsu-boot')
+     /* 正常揭幕时内容与底色都已经淡完，只剩收尾；跳过/异常路径没走两段，用 dsu-gone 兜一层。 */
+     var faded = (root.className || '').indexOf('dsu-handoff') !== -1
++    if (HANDOFF_ACTIVE) {
++      /* 连续交接进行中：不移除、不淡出根层，等覆盖层移到目标位、换成背景层之后再拆 */
++      setTimeout(function () {
++        if (root && root.parentNode) root.parentNode.removeChild(root)
++        diagRun('reveal: overlay removed t=' + Math.round((window.performance || Date).now()))
++        try { window.dispatchEvent(new CustomEvent('dsh-startup:done')) } catch (err) { /* noop */ }
++      }, 540)
++      return
++    }
+     root.classList.add('dsu-gone')
+     setTimeout(function () {
+       if (root && root.parentNode) root.parentNode.removeChild(root)

@@ -1,0 +1,5 @@
+*.bak
+*.bak-mita
+Thumbs.db
+desktop.ini
+.DS_Store
